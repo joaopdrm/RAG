@@ -1,0 +1,6 @@
+data
+env
+qdrant_storage
+*.pdf
+post_linkedin
+*.mdx
