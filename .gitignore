@@ -2,5 +2,8 @@ data
 env
 qdrant_storage
 *.pdf
-post_linkedin
+post_linkedin.md
 *.mdx
+__pycache__/
+*.pyc
+.pytest_cache/

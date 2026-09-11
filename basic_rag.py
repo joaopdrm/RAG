@@ -15,11 +15,14 @@ OFF = "\033[0m" if _TTY else ""
 
 client = QdrantClient(url="http://localhost:6333")
 
-if not client.collection_exists(collection_name="articles"):
-    client.create_collection(
-        collection_name="articles",
-        vectors_config=VectorParams(size=1024, distance=Distance.COSINE),
-    )
+try:
+    if not client.collection_exists(collection_name="articles"):
+        client.create_collection(
+            collection_name="articles",
+            vectors_config=VectorParams(size=1024, distance=Distance.COSINE),
+        )
+except Exception:
+    pass  # Qdrant pode estar fora do ar (testes/CI); nao deve impedir o import do modulo
 
 # dummy_data = [
 #     "joao",
@@ -128,6 +131,42 @@ def indexed_docs():
     return total, docs
 
 
+def dedupe_passages(points) -> list[tuple[str, str, float | None]]:
+    """[(slug, texto_normalizado, score)] descartando pontos cujos 80 primeiros
+    caracteres (normalizados) ja apareceram — Qdrant costuma repetir chunk quase
+    identico quando o PDF duplica uma pagina."""
+    seen: set[str] = set()
+    kept: list[tuple[str, str, float | None]] = []
+    for point in points:
+        texto = " ".join(point.payload["content"].split())
+        chave = texto[:80].lower()
+        if chave in seen:
+            continue
+        seen.add(chave)
+        kept.append((point.payload["slug"], texto, getattr(point, "score", None)))
+    return kept
+
+
+def build_prompt(passages: list[tuple[str, str, float | None]], question: str) -> str:
+    """Prompt de geracao: texto simples (nao XML) + instrucao explicita de recusa.
+
+    Historico: um formato anterior envolvia os trechos em tags <retrieved-data>;
+    com contexto ruim, o Mistral 7B ecoava essa estrutura e inventava o conteudo
+    dos trechos em vez de responder. Nao reintroduza esse wrapper.
+    """
+    contexto = "\n".join(f"[{slug}] {texto}" for slug, texto, _ in passages)
+    return (
+        "Você responde perguntas sobre artigos científicos usando SOMENTE o "
+        "contexto abaixo. Se o contexto não contiver a resposta, responda apenas: "
+        '"Não encontrei isso nos documentos." Não repita o contexto. '
+        "Responda sempre e unicamente em português do Brasil, independentemente do "
+        "idioma da pergunta ou do contexto recuperado.\n\n"
+        f"CONTEXTO:\n{contexto}\n\n"
+        f"PERGUNTA: {question}\n\n"
+        "RESPOSTA:"
+    )
+
+
 def print_intro():
     w = 60
     titulo = "RAG local - pergunte sobre os artigos no database"
@@ -203,25 +242,11 @@ def main():
         )
 
         # remove trechos duplicados/quase iguais e mostra o que foi recuperado
-        contexto, vistos = [], set()
-        for point in results.points:
-            texto = " ".join(point.payload["content"].split())
-            chave = texto[:80].lower()
-            if chave in vistos:
-                continue
-            vistos.add(chave)
-            contexto.append(f"[{point.payload['slug']}] {texto}")
-            print(f"{DIM}  · {point.score:.3f}  {texto[:90]}{OFF}")
+        passages = dedupe_passages(results.points)
+        for _, texto, score in passages:
+            print(f"{DIM}  · {score:.3f}  {texto[:90]}{OFF}")
 
-        augmented_prompt = (
-            "Você responde perguntas sobre artigos científicos usando SOMENTE o "
-            "contexto abaixo. Se o contexto não contiver a resposta, responda apenas: "
-            '"Não encontrei isso nos documentos." Não repita o contexto. '
-            "Responda sempre e unicamente em português do Brasil, independentemente do idioma da pergunta ou do contexto recuperado.\n\n"
-            f"CONTEXTO:\n{chr(10).join(contexto)}\n\n"
-            f"PERGUNTA: {prompt}\n\n"
-            "RESPOSTA:"
-        )
+        augmented_prompt = build_prompt(passages, prompt)
 
         print()
         try:

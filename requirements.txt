@@ -3,3 +3,4 @@ qdrant-client
 pyyaml
 watchdog
 pypdf
+pytest

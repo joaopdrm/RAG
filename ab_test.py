@@ -8,6 +8,9 @@ contexto bater com os trechos exibidos -- o RAG esta ancorado.
 Inclui de proposito uma pergunta fora do escopo do corpus (custo em FLOPs); a versao
 COM contexto deveria admitir que nao sabe, a versao SEM contexto provavelmente inventa.
 
+Reaproveita `dedupe_passages`/`build_prompt` do basic_rag.py -- o mesmo prompt que o
+loop de perguntas usa -- para o teste refletir o comportamento real do sistema.
+
 Uso:
     env/bin/python ab_test.py "sua pergunta"
     env/bin/python ab_test.py                 # roda o conjunto padrao
@@ -16,7 +19,7 @@ import sys
 
 import requests
 
-from basic_rag import client, generate_response
+from basic_rag import build_prompt, client, dedupe_passages, generate_response
 
 EMBED_MODEL = "mxbai-embed-large:335m"
 COLLECTION = "articles"
@@ -45,23 +48,8 @@ def retrieve(question: str):
 
 
 def answer_with_context(question: str, points) -> str:
-    passages = "\n".join(
-        f"- Article Title: {p.payload['title']} -- Article Slug: {p.payload['slug']}"
-        f" -- Article Content: {p.payload['content']}"
-        for p in points
-    )
-    prompt = f"""
-    The following are relevant passages:
-    <retrieved-data>
-    {passages}
-    </retrieved-data>
-
-    Here's the original user prompt, answer with help of the retrieved passages.
-    <user-prompt>
-    {question}
-    </user-prompt>
-    """
-    return generate_response(prompt).strip()
+    passages = dedupe_passages(points)
+    return generate_response(build_prompt(passages, question)).strip()
 
 
 def answer_without_context(question: str) -> str:
