@@ -5,6 +5,10 @@ import yaml
 import re
 import os
 import sys
+import shutil
+import textwrap
+
+WIDTH = min(shutil.get_terminal_size((100, 24)).columns, 92)
 
 # cores ANSI (desligadas se a saida nao for um terminal, ex. piped para arquivo)
 _TTY = sys.stdout.isatty()
@@ -29,6 +33,16 @@ except Exception:
 #     "Joao ama isabela",
 #     "Laila ama Joao"
 # ]
+
+def print_wrapped(texto: str, indent: str = "  "):
+    for paragrafo in texto.split("\n"):
+        if not paragrafo.strip():
+            print()
+            continue
+        print(textwrap.fill(
+            paragrafo, width=WIDTH,
+            initial_indent=indent, subsequent_indent=indent,
+        ))
 
 def extract_metadata_from_mdx(file_path: str):
     with open(file_path, "r", encoding="utf-8") as file:
@@ -78,7 +92,7 @@ def generate_response(prompt: str) -> str:
             "model": GEN_MODEL,
             "prompt": prompt,
             "stream": False,
-            "options": {"num_ctx": 4096},
+            "options": {"num_ctx": 4096, "temperature": 0},
         },
         timeout=600,
     )
@@ -148,7 +162,8 @@ def dedupe_passages(points) -> list[tuple[str, str, float | None]]:
 
 
 def build_prompt(passages: list[tuple[str, str, float | None]], question: str) -> str:
-    """Prompt de geracao: texto simples (nao XML) + instrucao explicita de recusa.
+    """Prompt de geracao: texto simples (nao XML); recusa restrita a contexto
+    totalmente fora do assunto.
 
     Historico: um formato anterior envolvia os trechos em tags <retrieved-data>;
     com contexto ruim, o Mistral 7B ecoava essa estrutura e inventava o conteudo
@@ -157,10 +172,13 @@ def build_prompt(passages: list[tuple[str, str, float | None]], question: str) -
     contexto = "\n".join(f"[{slug}] {texto}" for slug, texto, _ in passages)
     return (
         "Você responde perguntas sobre artigos científicos usando SOMENTE o "
-        "contexto abaixo. Se o contexto não contiver a resposta, responda apenas: "
-        '"Não encontrei isso nos documentos." Não repita o contexto. '
-        "Responda sempre e unicamente em português do Brasil, independentemente do "
-        "idioma da pergunta ou do contexto recuperado.\n\n"
+        "contexto abaixo. Não repita o contexto. "
+        "Se os trechos cobrirem a resposta apenas em parte, responda com o que "
+        "houver e diga o que ficou faltando. Use "
+        '"Não encontrei isso nos documentos." somente quando nenhum trecho '
+        "tratar do assunto. "
+        "Responda sempre e unicamente em português do Brasil, independentemente "
+        "do idioma da pergunta ou do contexto recuperado.\n\n"
         f"CONTEXTO:\n{contexto}\n\n"
         f"PERGUNTA: {question}\n\n"
         "RESPOSTA:"
@@ -174,17 +192,13 @@ def print_intro():
     print(f"│{titulo.center(w)}│")
     print(f"╰{'─' * w}╯{OFF}\n")
 
-    print(f"{BOLD}Como perguntar{OFF}")
-    print(f"  {DIM}·{OFF} seja específico e cite o tema ou o artigo")
-    print(f'    {DIM}"é sobre drift?"  ->  "como o método detecta concept drift sem rótulos?"{OFF}')
-    print(f"  {DIM}·{OFF} pode ser em português ou inglês")
-    print(f"  {DIM}·{OFF} pergunte só o que os documentos cobrem\n")
-
-    print(f"{BOLD}Confira a resposta{OFF}")
-    print(f"  {DIM}·{OFF} ela mistura os trechos recuperados com o que o modelo já sabe de treino")
-    print(f'  {DIM}·{OFF} peça "cite o trecho"; para testar, pergunte algo fora dos artigos')
-
-    print(f"{BOLD}Sair{OFF}  {DIM}·{OFF}  digite  exit  ou  q\n")
+    print_wrapped(
+        "Consultas em linguagem natural sobre artigos científicos indexados "
+        "localmente. As respostas são geradas a partir dos trechos recuperados "
+        "dos PDFs, com a origem indicada ao final.",
+        indent="",
+    )
+    print(f"\n{DIM}Sair · exit ou q{OFF}\n")
 
     total, docs = indexed_docs()
     if docs:
@@ -238,19 +252,24 @@ def main():
             collection_name="articles",
             query=embeddings,
             with_payload=True,
-            limit=8,
+            limit=5,
         )
 
         # remove trechos duplicados/quase iguais e mostra o que foi recuperado
         passages = dedupe_passages(results.points)
         for _, texto, score in passages:
-            print(f"{DIM}  · {score:.3f}  {texto[:90]}{OFF}")
+            preview = textwrap.shorten(texto, width=WIDTH - 12, placeholder="…")
+            print(f"{DIM}  · {score:.3f}  {preview}{OFF}")
 
         augmented_prompt = build_prompt(passages, prompt)
 
         print()
         try:
-            print(generate_response(augmented_prompt).strip())
+            resposta = generate_response(augmented_prompt).strip()
+            print_wrapped(resposta)
+            if not resposta.startswith("Não encontrei"):
+                fontes = sorted({slug for slug, _, _ in passages})
+                print(f"\n{DIM}  Artigos utilizados: {', '.join(fontes)}{OFF}")
         except Exception as exc:
             print(f"{DIM}[erro na geração] {exc}{OFF}")
             print(f"{DIM}os trechos acima já respondem; veja GEN_MODEL em basic_rag.py "
